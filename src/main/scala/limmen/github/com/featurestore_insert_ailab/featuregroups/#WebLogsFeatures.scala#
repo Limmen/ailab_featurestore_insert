@@ -1,0 +1,103 @@
+package limmen.github.com.featurestore_demo.featuregroup
+
+import org.apache.log4j.{ Level, LogManager, Logger }
+import org.apache.spark.sql.SparkSession
+import io.hops.util.Hops
+import org.apache.spark.sql.Row
+import scala.collection.JavaConversions._
+import collection.JavaConverters._
+
+/**
+ * Contains logic for computing the web_logs_features featuregroup
+ */
+object WebLogsFeatures {
+
+  case class RawWebLog(
+    action: String,
+    address: String,
+    cust_id: Int,
+    time_spent_seconds: Int,
+    web_id: Int)
+
+  case class WebLogFeature(
+    action: Long,
+    address: Long,
+    cust_id: Int,
+    time_spent_seconds: Int,
+    web_id: Int)
+
+  /**
+   * Computes the featuregroup
+   *
+   * @param input path to the input dataset to read (csv)
+   * @param output name of the output featuregroup table
+   * @param version version of the featuregroup
+   * @param partitions number of spark partitions to parallelize the compute on
+   * @param logger spark logger
+   * @param create boolean flag whether to create new featuregroup or insert into an existing ones
+   * @param jobId the id of the hopsworks job
+   */
+  def computeFeatures(spark: SparkSession, input: String, featuregroupName: String, version: Int,
+    partitions: Int, log: Logger, create: Boolean, jobId: Int, browserActionLookup: Map[String, Long] = null,
+    webAddressLookup: Map[String, Long] = null): Unit = {
+    log.info(s"Running computeFeatures for featuregroup: ${featuregroupName}")
+    val rawDf = spark.read.format("csv").option("header", "true").option("inferSchema", "true").load(input).repartition(partitions)
+    log.info("Read raw dataframe")
+    import spark.implicits._
+    val rawDs = rawDf.as[RawWebLog]
+    log.info("Parsed dataframe to dataset")
+    val featurestore = Hops.getProjectFeaturestore
+    var browserActionLookupMap: Map[String, Long] = null
+    if (browserActionLookup == null) {
+      val browserActionLookupDf = Hops.getFeaturegroup(spark, "browser_action_lookup", featurestore, 1)
+      val browserActionLookupList: Array[Row] = browserActionLookupDf.collect
+      browserActionLookupMap = browserActionLookupList.map((row: Row) => {
+        row.getAs[String]("browser_action") -> row.getAs[Long]("id")
+      }).toMap
+    } else {
+      browserActionLookupMap = browserActionLookup
+    }
+    var webAddressLookupMap: Map[String, Long] = null
+    if (webAddressLookup == null) {
+      val webAddressLookupDf = Hops.getFeaturegroup(spark, "web_address_lookup", featurestore, 1)
+      val webAddressLookupList: Array[Row] = webAddressLookupDf.collect
+      webAddressLookupMap = webAddressLookupList.map((row: Row) => {
+        row.getAs[String]("web_address") -> row.getAs[Long]("id")
+      }).toMap
+    } else {
+      webAddressLookupMap = webAddressLookup
+    }
+    val parsedDs = rawDs.map((webLog: RawWebLog) => {
+      val action = browserActionLookupMap(webLog.action)
+      val address = webAddressLookupMap(webLog.address)
+      val cust_id = webLog.cust_id
+      val time_spent_seconds = webLog.time_spent_seconds
+      val web_id = webLog.web_id
+      WebLogFeature(action, address, cust_id, time_spent_seconds, web_id)
+    })
+    val descriptiveStats = true
+    val featureCorr = true
+    val featureHistograms = true
+    val clusterAnalysis = true
+    val statColumns = List[String]().asJava
+    val numBins = 20
+    val corrMethod = "pearson"
+    val numClusters = 5
+    val description = "Features on web logs recording customers activity with the internet bank"
+    val primaryKey = "cust_id"
+    val dependencies = List[String](input).asJava
+    if (create) {
+      log.info(s"Creating featuregroup $featuregroupName version $version in featurestore $featurestore")
+      Hops.createFeaturegroup(spark, parsedDs.toDF, featuregroupName, featurestore, version, description,
+        jobId, dependencies, primaryKey, descriptiveStats, featureCorr, featureHistograms, clusterAnalysis,
+        statColumns, numBins, corrMethod, numClusters)
+      log.info(s"Creation of featuregroup $featuregroupName complete")
+    } else {
+      log.info(s"Inserting into featuregroup $featuregroupName version $version in featurestore $featurestore")
+      Hops.insertIntoFeaturegroup(spark, parsedDs.toDF, featuregroupName, featurestore, version, "overwrite",
+        descriptiveStats, featureCorr, featureHistograms, clusterAnalysis, statColumns, numBins, corrMethod,
+        numClusters)
+      log.info(s"Insertion into featuregroup $featuregroupName complete")
+    }
+  }
+}

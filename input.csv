@@ -1,0 +1,2 @@
+name,inputFile,description,clusterAnalysis,featureHistograms,descriptiveStats,featureCorr,primaryKey,entityType,dataFormat
+test,test,test,true,true,true,true,test,test,test
